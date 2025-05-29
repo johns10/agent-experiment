@@ -37,13 +37,14 @@ Make a commit for each phase when complete.
 **Status:** ✅ COMPLETED - All tests passing (16/16), Full GenServer implementation with 6 API functions, MCP integration, stats tracking
 
 ### Task 4: Complete AgentServer Tool Integration (Part 2)
-**Estimated Turns:** 7
-**Description:** Add MCP tool integration, action execution, and advanced GenServer callbacks
+**Estimated Turns:** 7 **Actual Turns:** 4
+**Description:** Add MCP tool integration, action execution logic, and advanced GenServer callbacks
 **Deliverables:**
 - Complete tool executor implementation
 - Action decision and execution logic
 - State management for action history
 - All GenServer callbacks functional
+**Status:** ✅ COMPLETED - Generic MCP integration with real Hermes client, proper separation of concerns, all tests passing (31/31)
 
 ## Agent Implementations
 

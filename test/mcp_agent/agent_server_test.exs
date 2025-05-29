@@ -16,9 +16,9 @@ defmodule MCPAgent.AgentServerTest do
       assert function_exported?(AgentServer, :get_stats, 1)
     end
 
-    test "has proper GenServer behavior" do
-      # Check that it's a GenServer
-      behaviours = AgentServer.module_info(:attributes)[:behaviour] || []
+    test "has proper GenServer behavior in Server module" do
+      # Check that the Server module has GenServer behavior
+      behaviours = MCPAgent.AgentServer.Server.module_info(:attributes)[:behaviour] || []
       assert GenServer in behaviours
     end
   end
@@ -112,7 +112,7 @@ defmodule MCPAgent.AgentServerTest do
 
   describe "AgentServer GenServer implementation" do
     test "implements required GenServer callbacks" do
-      # Check that required callbacks are implemented using GenServer behavior info
+      # Check that required callbacks are implemented in the Server module
       callbacks = GenServer.behaviour_info(:callbacks)
       
       required_callbacks = [
@@ -124,6 +124,12 @@ defmodule MCPAgent.AgentServerTest do
       
       for callback <- required_callbacks do
         assert callback in callbacks, "Required callback #{inspect(callback)} not found"
+      end
+      
+      # Verify the Server module actually implements these
+      server_functions = MCPAgent.AgentServer.Server.__info__(:functions)
+      for {name, arity} <- required_callbacks do
+        assert {name, arity} in server_functions, "Server module missing #{name}/#{arity}"
       end
     end
 
