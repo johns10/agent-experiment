@@ -6,31 +6,51 @@ defmodule MCPAgent.AgentServer do
   that follow the MCPAgent.Agent protocol. It handles agent lifecycle, state management,
   input processing, and coordination with MCP tools.
   
+  ## Architecture
+  
+  The AgentServer is designed to be tool-agnostic and work with any MCP client:
+  
+  - **Tool Discovery**: Uses Hermes.Client.list_tools/1 to dynamically discover available tools
+  - **Tool Execution**: Uses Hermes.Client.call_tool/3 to execute tools via MCP protocol
+  - **Separation of Concerns**: Does not define or hard-code specific tools
+  - **Generic Design**: Works with any MCP server (knowledge graph, filesystem, etc.)
+  
+  ## MCP Integration
+  
+  The server expects an MCP client (from Hermes library) that handles:
+  - Connection to external MCP servers (npm packages, separate processes)
+  - Tool discovery and schema validation
+  - Tool execution and result handling
+  
+  Example MCP clients: knowledge graph server, filesystem server, web search server
+  
   ## Features
   
   - Agent initialization with configuration
   - Asynchronous input processing
   - State management and persistence
-  - MCP tool discovery and integration
+  - Dynamic MCP tool discovery and integration
   - Action triggering and execution
   - Status monitoring and reporting
+  - Performance metrics and statistics
   
   ## Usage
   
-      # Start an agent server
+      # Start an agent server with MCP client
       {:ok, pid} = MCPAgent.AgentServer.start_link([
-        agent_impl: MyAgent.new("test"),
-        agent_config: %{threshold: 10},
-        mcp_client: :my_mcp_client
+        agent_impl: MyAgent.new("research-agent"),
+        agent_config: %{domain: "AI research"},
+        mcp_client: MCPAgent.KnowledgeClient  # Hermes client connected to knowledge server
       ])
       
       # Send input to the agent
-      MCPAgent.AgentServer.send_input(pid, "Hello, agent!")
+      MCPAgent.AgentServer.send_input(pid, "research quantum computing")
       
-      # Get current state
+      # Get current state and discovered tools
       state = MCPAgent.AgentServer.get_state(pid)
+      tools = MCPAgent.AgentServer.get_tools(pid)  # Tools from MCP server
       
-      # Trigger action decision
+      # Trigger action decision (may use MCP tools)
       MCPAgent.AgentServer.trigger_action(pid)
   """
   
@@ -38,6 +58,9 @@ defmodule MCPAgent.AgentServer do
   require Logger
 
   alias MCPAgent.Agent
+
+  # Note: Hermes is used for MCP client communication
+  # The dependency should be available when the AgentServer is used with real MCP clients
 
   # Client API
 
@@ -203,6 +226,11 @@ defmodule MCPAgent.AgentServer do
       
       Logger.info("AgentServer initialized successfully with #{length(tools)} tools")
       
+      # Schedule periodic tool refresh if MCP client is configured
+      if mcp_client do
+        schedule_tool_refresh()
+      end
+      
       {:ok, state}
     rescue
       error ->
@@ -299,6 +327,27 @@ defmodule MCPAgent.AgentServer do
   end
 
   @impl GenServer
+  def handle_info({:tool_call_attempted, tool_name}, state) do
+    Logger.debug("Tool call attempted: #{tool_name}")
+    updated_stats = update_stats(state.stats, :tool_calls)
+    {:noreply, %{state | stats: updated_stats}}
+  end
+
+  @impl GenServer
+  def handle_info({:tool_call_success, tool_name}, state) do
+    Logger.debug("Tool call succeeded: #{tool_name}")
+    # Tool success is already counted in tool_calls, no additional stat needed
+    {:noreply, state}
+  end
+
+  @impl GenServer
+  def handle_info({:tool_call_error, tool_name}, state) do
+    Logger.debug("Tool call failed: #{tool_name}")
+    updated_stats = update_stats(state.stats, :tool_errors)
+    {:noreply, %{state | stats: updated_stats}}
+  end
+
+  @impl GenServer
   def handle_info(msg, state) do
     Logger.warning("Received unexpected message: #{inspect(msg)}")
     {:noreply, state}
@@ -313,30 +362,35 @@ defmodule MCPAgent.AgentServer do
   end
   
   defp fetch_mcp_tools(mcp_client) when is_atom(mcp_client) or is_pid(mcp_client) do
-    try do
-      # This is a placeholder for actual MCP integration
-      # In a real implementation, this would call Hermes.Client.list_tools/1
-      case mcp_client do
-        :mock_client ->
-          [
-            %{name: "web_search", description: "Search the web"},
-            %{name: "file_read", description: "Read file contents"},
-            %{name: "execute_command", description: "Execute system command"}
-          ]
-        _ ->
-          Logger.debug("MCP client #{inspect(mcp_client)} not available, using empty tools")
-          []
-      end
-    rescue
-      error ->
-        Logger.warning("Failed to fetch MCP tools: #{inspect(error)}")
-        []
-    end
+    fetch_tools_via_hermes(mcp_client)
   end
   
   defp fetch_mcp_tools(mcp_client) do
     Logger.warning("Invalid MCP client type: #{inspect(mcp_client)}")
     []
+  end
+  
+  @spec fetch_tools_via_hermes(atom() | pid()) :: list()
+  defp fetch_tools_via_hermes(mcp_client) do
+    case Hermes.Client.list_tools(mcp_client) do
+      {:ok, %{tools: tools}} ->
+        Logger.info("Discovered #{length(tools)} tools from MCP client #{inspect(mcp_client)}")
+        tools
+      
+      {:ok, result} ->
+        # Handle different response formats
+        tools = Map.get(result, "tools", [])
+        Logger.info("Discovered #{length(tools)} tools from MCP client #{inspect(mcp_client)}")
+        tools
+      
+      {:error, reason} ->
+        Logger.warning("Failed to list tools from MCP client #{inspect(mcp_client)}: #{inspect(reason)}")
+        []
+    end
+  rescue
+    error ->
+      Logger.warning("Error calling Hermes.Client.list_tools for #{inspect(mcp_client)}: #{inspect(error)}")
+      []
   end
 
   @spec process_agent_input(any(), any(), any(), list()) :: 
@@ -355,7 +409,9 @@ defmodule MCPAgent.AgentServer do
     case Agent.decide_action(state.agent_impl, state.agent_state, state.tools) do
       {:action, action} ->
         Logger.debug("Agent decided to take autonomous action: #{inspect(action)}")
-        execute_action_with_decision(state, action)
+        updated_stats = update_stats(state.stats, :autonomous_actions)
+        new_state = %{state | stats: updated_stats}
+        execute_action_with_decision(new_state, action)
       
       :no_action ->
         Logger.debug("Agent decided no action needed")
@@ -394,24 +450,114 @@ defmodule MCPAgent.AgentServer do
 
   @spec execute_action_with_decision(map(), any()) :: map()
   defp execute_action_with_decision(state, action) do
-    # For now, we'll implement basic action execution without actual tool calls
-    # This will be expanded in Part 2 of the AgentServer implementation
+    Logger.info("Executing action: #{inspect(action)}")
     
-    Logger.info("Action execution scheduled: #{inspect(action)}")
+    # Create a tool executor function for the agent
+    tool_executor = create_tool_executor(state.mcp_client)
     
-    action_record = %{
-      action: action,
-      result: :scheduled,
-      timestamp: DateTime.utc_now(),
-      status: :pending
-    }
+    # Execute the action using the agent's execute_action function
+    case execute_agent_action(state.agent_impl, action, state.agent_state, tool_executor) do
+      {:ok, result, new_agent_state} ->
+        Logger.info("Action executed successfully: #{inspect(result)}")
+        
+        action_record = %{
+          action: action,
+          result: result,
+          timestamp: DateTime.utc_now(),
+          status: :completed,
+          execution_time_ms: 0  # Could be measured if needed
+        }
+        
+        %{
+          state | 
+          agent_state: new_agent_state,
+          action_history: [action_record | Enum.take(state.action_history, 19)], # Keep last 20
+          last_action_at: DateTime.utc_now(),
+          stats: update_stats(state.stats, :action_executed)
+        }
+      
+      {:error, reason} ->
+        Logger.error("Action execution failed: #{inspect(reason)}")
+        
+        action_record = %{
+          action: action,
+          result: nil,
+          error: reason,
+          timestamp: DateTime.utc_now(),
+          status: :failed
+        }
+        
+        %{
+          state | 
+          action_history: [action_record | Enum.take(state.action_history, 19)],
+          last_action_at: DateTime.utc_now(),
+          stats: update_stats(state.stats, :action_error)
+        }
+    end
+  end
+
+  @spec create_tool_executor(any()) :: function()
+  defp create_tool_executor(mcp_client) do
+    fn tool_name, args ->
+      # Send stats update to the server process
+      send(self(), {:tool_call_attempted, tool_name})
+      
+      case execute_mcp_tool(mcp_client, tool_name, args) do
+        {:ok, _result} = success ->
+          send(self(), {:tool_call_success, tool_name})
+          success
+        
+        {:error, _reason} = error ->
+          send(self(), {:tool_call_error, tool_name})
+          error
+      end
+    end
+  end
+
+  @spec execute_mcp_tool(any(), String.t(), map()) :: {:ok, any()} | {:error, any()}
+  defp execute_mcp_tool(nil, tool_name, _args) do
+    Logger.warning("Cannot execute tool '#{tool_name}': No MCP client configured")
+    {:error, :no_mcp_client}
+  end
+
+  defp execute_mcp_tool(mcp_client, tool_name, args) when is_atom(mcp_client) or is_pid(mcp_client) do
+    execute_tool_via_hermes(mcp_client, tool_name, args)
+  end
+
+  defp execute_mcp_tool(mcp_client, tool_name, _args) do
+    Logger.error("Invalid MCP client type: #{inspect(mcp_client)} for tool: #{tool_name}")
+    {:error, {:invalid_mcp_client, mcp_client}}
+  end
+
+  @spec execute_tool_via_hermes(atom() | pid(), String.t(), map()) :: {:ok, any()} | {:error, any()}
+  defp execute_tool_via_hermes(mcp_client, tool_name, args) do
+    Logger.debug("Executing tool '#{tool_name}' via Hermes client #{inspect(mcp_client)}")
     
-    %{
-      state | 
-      action_history: [action_record | state.action_history],
-      last_action_at: DateTime.utc_now(),
-      stats: update_stats(state.stats, :action_scheduled)
-    }
+    case Hermes.Client.call_tool(mcp_client, tool_name, args) do
+      {:ok, result} ->
+        Logger.debug("Tool '#{tool_name}' executed successfully")
+        {:ok, result}
+      
+      {:error, reason} ->
+        Logger.warning("Tool '#{tool_name}' execution failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  rescue
+    error ->
+      Logger.error("Error calling Hermes.Client.call_tool for '#{tool_name}': #{inspect(error)}")
+      {:error, {:hermes_error, error}}
+  end
+
+  @spec execute_agent_action(any(), any(), any(), function()) :: 
+    {:ok, any(), any()} | {:error, any()}
+  defp execute_agent_action(agent_impl, action, agent_state, tool_executor) do
+    try do
+      Agent.execute_action(agent_impl, action, agent_state, tool_executor)
+    rescue
+      error ->
+        Logger.error("Agent action execution error: #{inspect(error)}")
+        {:error, {:agent_execution_error, error}}
+    end
   end
 
   @spec init_stats() :: map()
@@ -423,7 +569,10 @@ defmodule MCPAgent.AgentServer do
       actions_triggered: 0,
       actions_scheduled: 0,
       actions_executed: 0,
-      action_errors: 0
+      action_errors: 0,
+      tool_calls: 0,
+      tool_errors: 0,
+      autonomous_actions: 0
     }
   end
 
